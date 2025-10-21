@@ -1,5 +1,97 @@
 #include <TFT_eSPI.h>
+#include <SPI.h>
 #include <WiFi.h>
+#include <FS.h>
+#include <SD.h>
+#include <Wire.h>
+#include <Adafruit_PN532.h>
+
+SPIClass SDSPI(HSPI);
+
+// You need these to have the SD card read like Noah has it configured
+#define MY_CS    27 // Blue 
+#define MY_SCLK  26 // Green 
+#define MY_MOSI  25 // Orange
+#define MY_MISO  33 // White
+
+// If using the breakout with SPI, define the pins for SPI communication.
+#define PN532_SCK  21 // Blue
+#define PN532_MISO 22 // White
+#define PN532_MOSI 17 // Orange
+#define PN532_SS   15 // Yellow
+
+// Breakout with SPI connection
+Adafruit_PN532 nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
+
+
+
+void setupNFC() {
+  Serial.begin(115200);
+  while (!Serial) delay(1); // for Leonardo/Micro/Zero
+
+  nfc.begin();
+
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (!versiondata) {
+    Serial.print("Didn't find PN53x board");
+    while (1); // halt
+  }
+
+  // Got ok data, print it out!
+  Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX);
+  Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC);
+  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
+
+  // Set the max number of retry attempts to read from a card
+  // This prevents us from waiting forever for a card, which is
+  // the default behaviour of the PN532.
+  nfc.setPassiveActivationRetries(0xFF);
+
+  Serial.println("Waiting for an ISO14443A card");
+
+}
+
+
+void setupSDCard() {
+    SDSPI.begin(MY_SCLK, MY_MISO, MY_MOSI, MY_CS);
+    //Assuming use of SPI SD card
+    if (!SD.begin(MY_CS, SDSPI)) {
+        Serial.println("Card Mount Failed");
+    } 
+    else {
+        Serial.println("SDCard Mount PASS");
+    }
+}
+
+// TODO: Add
+void runNFCLoop() {
+  boolean success;
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };	// Buffer to store the returned UID
+  uint8_t uidLength;				// Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+
+  // Wait for an ISO14443A type cards (Mifare, etc.).  When one is found
+  // 'uid' will be populated with the UID, and uidLength will indicate
+  // if the uid is 4 bytes (Mifare Classic) or 7 bytes (Mifare Ultralight)
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength);
+
+  if (success) {
+    Serial.println("Found a card!");
+    Serial.print("UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
+    Serial.print("UID Value: ");
+    for (uint8_t i=0; i < uidLength; i++)
+    {
+      Serial.print(" 0x");Serial.print(uid[i], HEX);
+    }
+    Serial.println("");
+	// Wait 1 second before continuing
+	delay(1000);
+  }
+  else
+  {
+    // PN532 probably timed out waiting for a card
+    Serial.println("Timed out waiting for a card");
+  }
+}
 
 // Display setup
 TFT_eSPI tft = TFT_eSPI();
@@ -34,6 +126,15 @@ const int SCREEN_HEIGHT = 135;
 void setup() {
   Serial.begin(115200);
   Serial.println("CyberSp0re - Genetic Evolution Simulator");
+
+  // Start the SD card
+  setupSDCard();
+
+  // We want to see the 'SD card message' 
+  delay(1000);
+
+  // Start the NFC 
+  setupNFC();
   
   // Initialize display
   tft.init();
