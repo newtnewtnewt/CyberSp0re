@@ -5,6 +5,8 @@
 #include <SD.h>
 #include <Wire.h>
 #include <Adafruit_PN532.h>
+#include <string>
+#include <vector>
 
 SPIClass SDSPI(HSPI);
 
@@ -63,8 +65,7 @@ void setupSDCard() {
     }
 }
 
-// TODO: Add
-void runNFCLoop() {
+String checkNFCScan() {
   boolean success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };	// Buffer to store the returned UID
   uint8_t uidLength;				// Length of the UID (4 or 7 bytes depending on ISO14443A card type)
@@ -72,24 +73,32 @@ void runNFCLoop() {
   // Wait for an ISO14443A type cards (Mifare, etc.).  When one is found
   // 'uid' will be populated with the UID, and uidLength will indicate
   // if the uid is 4 bytes (Mifare Classic) or 7 bytes (Mifare Ultralight)
-  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength);
+  // 10 for 10 MS delay so it doesn't infinitely block
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength, 100);
+
+  String uidOfScannedCard = "";
 
   if (success) {
-    Serial.println("Found a card!");
-    Serial.print("UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
-    Serial.print("UID Value: ");
-    for (uint8_t i=0; i < uidLength; i++)
-    {
-      Serial.print(" 0x");Serial.print(uid[i], HEX);
+    int offset = 0;
+    char uidStr[32];
+
+    // The absurd process for creating a string from a uint8_t in Arduino C++
+    for (uint8_t i = 0; i < uidLength; i++) {
+        offset += snprintf(uidStr + offset,
+                           sizeof(uidStr) - offset,
+                           "%02X%s",
+                           uid[i],
+                           (i < uidLength - 1) ? ":" : "");
     }
-    Serial.println("");
-	// Wait 1 second before continuing
-	delay(1000);
+
+    String uidOfScannedCard(uidStr);
+    Serial.println("Found a card! UID Length: " + String(uidLength) + ", UID: " + uidOfScannedCard);
+    // Wait 1 second before continuing
+    return uidOfScannedCard;
   }
-  else
-  {
+  else {
     // PN532 probably timed out waiting for a card
-    Serial.println("Timed out waiting for a card");
+    return uidOfScannedCard;
   }
 }
 
@@ -112,7 +121,10 @@ struct CreatureGenes {
 
 // Global variables
 CreatureGenes currentCreature;
-int generation = 0;
+// TODO: Check against the existing database of saved Mutations we've saved
+std::vector<String> alreadyMutatedWith;
+
+uint8_t generation = 0;
 unsigned long lastMutationTime = 0;
 const unsigned long MUTATION_INTERVAL = 1000; // 1 second per generation
 float creatureX = 120; // Center of screen
@@ -123,9 +135,110 @@ float moveDirection = 0;
 const int SCREEN_WIDTH = 240;
 const int SCREEN_HEIGHT = 135;
 
+void resetCreatureData() {
+  if (SD.exists("/creature.dat")) {
+    SD.remove("/creature.dat");
+    Serial.println("Reset creature data, creature.dat deleted.");
+  } else {
+    Serial.println("Attempted to reset creature data, creature.dat did not exist.");
+  }
+}
+
+void saveCreatureData() {
+  File file = SD.open("/creature.dat", FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open creature.dat for writing!");
+    return;
+  }
+
+  // --- Save CreatureGenes struct ---
+  file.write((uint8_t*)&currentCreature, sizeof(CreatureGenes));
+
+  // --- Save generation (int or uint16_t or whatever type you use) ---
+  file.write((uint8_t*)&generation, sizeof(generation));
+
+  // --- Save vector size ---
+  uint8_t count = alreadyMutatedWith.size();
+  file.write(count);
+
+  // --- Save each string as null-terminated UTF-8 ---
+  for (auto &s : alreadyMutatedWith) {
+    file.write((const uint8_t*)s.c_str(), s.length());
+    file.write('\0');  // null terminator
+  }
+
+  file.close();
+  Serial.println("Saved creature.dat successfully.");
+}
+
+String loadCreatureData() {
+  File file = SD.open("/creature.dat", FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open creature.dat for reading!");
+    return "Empty";
+  }
+
+  // --- Load CreatureGenes struct ---
+  if (file.read((uint8_t*)&currentCreature, sizeof(CreatureGenes)) != sizeof(CreatureGenes)) {
+    Serial.println("Error: creature.dat is corrupted (struct).");
+    file.close();
+    return "Fail";
+  }
+
+  // --- Load generation ---
+  if (file.read((uint8_t*)&generation, sizeof(generation)) != sizeof(generation)) {
+    Serial.println("Error: creature.dat is corrupted (generation).");
+    file.close();
+    return "Fail";
+  }
+
+  // --- Load vector count ---
+  int count = file.read();
+  if (count < 0) {
+    Serial.println("Error: creature.dat is corrupted (count).");
+    file.close();
+    return "Fail";
+  }
+
+  alreadyMutatedWith.clear();
+  alreadyMutatedWith.reserve(count);
+
+  // --- Load null-terminated strings ---
+  String temp = "";
+  while (alreadyMutatedWith.size() < count && file.available()) {
+    char c = file.read();
+    if (c == '\0') {
+      alreadyMutatedWith.push_back(temp);
+      Serial.println("Added a mutated value: " + temp);
+      temp = "";
+    } else {
+      temp += c;
+    }
+  }
+
+  file.close();
+  Serial.println("Loaded creature.dat successfully.");
+
+  // Debug print
+  Serial.println("=== Loaded Genes ===");
+  Serial.println("Body size: " + String(currentCreature.bodySize));
+  Serial.println("Body color: " + 
+                 String(currentCreature.bodyColorR) + "," +
+                 String(currentCreature.bodyColorG) + "," +
+                 String(currentCreature.bodyColorB));
+  Serial.println("Appendage count: " + String(currentCreature.appendageCount));
+
+  Serial.println("Generation: " + String(generation));
+
+  Serial.println("=== Mutated With ===");
+  for (auto &s : alreadyMutatedWith) Serial.println(s);
+
+  return "Success";
+}
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("CyberSp0re - Genetic Evolution Simulator");
+  Serial.println("Cyb3rSp0r3 - Genetic Evolution Simulator");
 
   // Start the SD card
   setupSDCard();
@@ -136,6 +249,7 @@ void setup() {
   // Start the NFC 
   setupNFC();
   
+
   // Initialize display
   tft.init();
   tft.setRotation(1); // Landscape orientation
@@ -144,45 +258,59 @@ void setup() {
   // Initialize random seed
   randomSeed(analogRead(34)); // Use ADC pin for random seed
   
-  // Initialize starting creature with basic genes
-  initializeCreature();
-  
+  String loadStatus = loadCreatureData();
+  if (loadStatus == "Empty" || loadStatus == "Fail") {
+    // Initialize starting creature with basic genes
+    Serial.println("File was not able to be opened, status: " + loadStatus + ", recreating creature");
+    initializeCreature();
+    saveCreatureData();
+  }
+  else {
+    Serial.println("Successfully loaded creature data from file!");
+  }
+
   // Display welcome message
   displayWelcome();
   delay(2000);
+  tft.fillScreen(TFT_BLACK);
   
   Serial.println("Evolution simulation started!");
 }
 
-void loop() {
-  // Check if it's time for next generation
-  if (millis() - lastMutationTime >= MUTATION_INTERVAL) {
-    mutateCreature();
-    generation++;
-    
-    // Reset at generation 50
-    if (generation >= 50) {
-      generation = 0;
-      initializeCreature();
-      Serial.println("Creature reset to generation 0");
+bool inVector(const String &value, const std::vector<String> &vec) {
+    for (const auto &s : vec) {
+        if (s == value) {
+            return true;
+        }
     }
-    
-    lastMutationTime = millis();
+    return false;
+}
+
+void loop() {
+  String mutateUID = checkNFCScan();
+  if (mutateUID.length() == 0) {
+    // We didn't detect anything from NFC chip, continue as normal
+  }
+  else {
+    bool alreadyMutated = inVector(mutateUID, alreadyMutatedWith);
+    if (alreadyMutated) {
+      Serial.println("Already mutated with that one!");
+      // TODO: Display message on screen if not new mutation
+    }
+    else {
+      Serial.println("Yay! A new mutation! UID: " + mutateUID);
+      generation++;
+      mutateCreature();
+      alreadyMutatedWith.push_back(mutateUID);
+      // Clear and redraw
+      tft.fillScreen(TFT_BLACK);
+      // TODO: Display message if new mutation (maybe stat sheet)
+      saveCreatureData();
+    }
   }
   
-  // Update creature movement (but slower for less spazzing)
-  static unsigned long lastMovementUpdate = 0;
-  if (millis() - lastMovementUpdate > 100) { // Update movement every 100ms
-    updateCreatureMovement();
-    lastMovementUpdate = millis();
-  }
-  
-  // Clear and redraw
-  tft.fillScreen(TFT_BLACK);
   drawCreature();
   drawUI();
-  
-  delay(150); // Slower, smoother animation
 }
 
 void initializeCreature() {
@@ -276,7 +404,8 @@ void mutateCreature() {
     Serial.println("CHAOS MUTATION OCCURRED!");
   }
   
-  Serial.print("Generation "); Serial.print(generation);
+  Serial.print("Generation "); 
+  Serial.print(generation);
   Serial.print(" - Mutations complete. Body size: "); Serial.println(currentCreature.bodySize);
 }
 
@@ -361,34 +490,29 @@ void drawUI() {
   tft.setCursor(5, 5);
   tft.print("Gen: ");
   tft.print(generation);
-  
-  // Progress bar for generation cycle
-  int progress = ((millis() - lastMutationTime) * 50) / MUTATION_INTERVAL;
-  tft.drawRect(5, 15, 52, 8, TFT_WHITE);
-  tft.fillRect(6, 16, progress, 6, TFT_GREEN);
-  
+    
   // Creature stats
-  tft.setCursor(5, 30);
+  tft.setCursor(5, 15);
   tft.setTextSize(1);
   tft.print("Size:");
   tft.print(currentCreature.bodySize);
   
-  tft.setCursor(5, 40);
+  tft.setCursor(5, 25);
   tft.print("Apps:");
   tft.print(currentCreature.appendageCount);
   
-  tft.setCursor(5, 50);
+  tft.setCursor(5, 35);
   tft.print("IQ:");
   tft.print(currentCreature.intelligence);
   
-  tft.setCursor(5, 60);
+  tft.setCursor(5, 45);
   tft.print("Spd:");
   tft.print(currentCreature.speed);
   
   // Title
   tft.setCursor(150, 5);
   tft.setTextColor(TFT_CYAN);
-  tft.print("CyberSp0re");
+  tft.print("Cyb3rSp0r3");
   
   tft.setCursor(150, 15);
   tft.setTextColor(TFT_YELLOW);
@@ -400,7 +524,7 @@ void displayWelcome() {
   tft.setTextColor(TFT_CYAN);
   tft.setTextSize(2);
   tft.setCursor(50, 40);
-  tft.print("CyberSp0re");
+  tft.print("Cyb3rSp0r3");
   
   tft.setTextColor(TFT_GREEN);
   tft.setTextSize(1);
@@ -409,8 +533,10 @@ void displayWelcome() {
   
   tft.setTextColor(TFT_YELLOW);
   tft.setCursor(70, 90);
-  tft.print("DEFCON 2025");
+  tft.print("DEFCON 2026");
   
+  //TODO: Display current number of acquired mutations
+
   tft.setTextColor(TFT_WHITE);
   tft.setCursor(60, 110);
   tft.print("Initializing...");
